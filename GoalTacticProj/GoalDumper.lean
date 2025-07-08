@@ -1,3 +1,4 @@
+-- no module declaration needed in Lean 4
 import Lean
 open Lean Meta Elab Tactic IO
 
