@@ -36,3 +36,30 @@ elab "dumpGoalToFile" : tactic => do
   let file := "goal_output.txt"
   IO.FS.writeFile file out
   logInfo m!"Goal written to {file}"
+
+/-- Append `data` to a file `path`, creating it if necessary. -/
+def appendFile (path : System.FilePath) (data : String) : IO Unit := do
+  let h ← IO.FS.Handle.mk path IO.FS.Mode.append
+  h.putStr data
+  h.flush
+
+/-- Tactic wrapper that logs the goal + tactic to file, then applies the tactic -/
+elab "logStep" tac:tacticSeq : tactic => do
+  -- 1. Goal string
+  let goalStr ← collectGoalInfo
+
+  -- 2. Tactic string
+  let tacticStr := toString tac
+
+  -- 3. Format as real JSON
+  let jsonObj : Json := Json.mkObj [
+    ("goal", Json.str goalStr),
+    ("tactic", Json.str tacticStr)
+  ]
+  let log := Json.compress jsonObj ++ "\n"
+
+  -- 4. Write
+  appendFile "goal_tactic_log.jsonl" log
+
+  -- 5. Apply tactic
+  evalTactic tac
