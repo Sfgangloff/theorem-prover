@@ -8,7 +8,7 @@ repo = LeanGitRepo("https://github.com/Sfgangloff/theorem-prover", "21e8cf86c103
 trace(repo, dst_dir="traced_repo")
 
 # 2️⃣ Load your target theorem
-thm = Theorem.from_traced_repo("theorems_to_prove/Test_theorem.lean", "example", repo)
+thm = Theorem.from_traced_repo("Main.lean", "example", repo)
 
 # 3️⃣ Start Dojo (Lean gym)
 dojo = Dojo(thm, timeout=300)
