@@ -4,7 +4,7 @@ from infer import predict  # your trained model
 
 
 # 1️⃣ Initialize and trace
-repo = LeanGitRepo("https://github.com/Sfgangloff/theorem-prover", "21e8cf86c103ae68cbe74aa68b7220ffe6055225")
+repo = LeanGitRepo("https://github.com/Sfgangloff/theorem-prover", "23e1d2e2fb2a3a63592e30ff5a77b953c5f6ac06")
 trace(repo, dst_dir="traced_repo")
 
 # 2️⃣ Load your target theorem
