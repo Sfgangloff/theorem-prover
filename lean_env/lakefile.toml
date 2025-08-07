@@ -1,0 +1,10 @@
+name = "lean_env"
+version = "0.1.0"
+defaultTargets = ["lean_env"]
+
+[[lean_lib]]
+name = "LeanEnv"
+
+[[lean_exe]]
+name = "lean_env"
+root = "Main"

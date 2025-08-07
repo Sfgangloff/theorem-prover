@@ -1,0 +1,9 @@
+# Ignore build artifacts
+/.lake/
+/build/
+
+# VSCode, editor files
+.vscode/
+*.swp
+*.tmp
+*.log
