@@ -1,0 +1,3 @@
+[submodule "extern/mathlib"]
+	path = extern/mathlib
+	url = https://github.com/leanprover-community/mathlib4.git
