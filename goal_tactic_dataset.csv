@@ -1,8 +1,0 @@
-goal,tactic
-m + 0 = n,"( Tactic . tacticSeq ( Tactic . tacticSeq1Indented [ ( Tactic . rwSeq ""rw"" ( Tactic . optConfig [ ] ) ( Tactic . rwRuleSeq "" [ "" [ ( Tactic . rwRule [ ( patternIgnore ( token . «← » ""←"" ) ) ] ` h ) ] "" ] "" ) [ ] ) ] ) )"
-n + 0 = n,"( Tactic . tacticSeq ( Tactic . tacticSeq1Indented [ ( Tactic . simp ""simp"" ( Tactic . optConfig [ ] ) [ ] [ ] [ ] [ ] ) ] ) )"
-m + 0 = n,"( Tactic . tacticSeq ( Tactic . tacticSeq1Indented [ ( Tactic . rwSeq ""rw"" ( Tactic . optConfig [ ] ) ( Tactic . rwRuleSeq "" [ "" [ ( Tactic . rwRule [ ( patternIgnore ( token . «← » ""←"" ) ) ] ` h ) ] "" ] "" ) [ ] ) ] ) )"
-n + 0 = n,"( Tactic . tacticSeq ( Tactic . tacticSeq1Indented [ ( Tactic . simp ""simp"" ( Tactic . optConfig [ ] ) [ ] [ ] [ ] [ ] ) ] ) )"
-n + 0 = n,"( Tactic . tacticSeq ( Tactic . tacticSeq1Indented [ ( Tactic . simp ""simp"" ( Tactic . optConfig [ ] ) [ ] [ ] [ ] [ ] ) ] ) )"
-m + 0 = n,"( Tactic . tacticSeq ( Tactic . tacticSeq1Indented [ ( Tactic . rwSeq ""rw"" ( Tactic . optConfig [ ] ) ( Tactic . rwRuleSeq "" [ "" [ ( Tactic . rwRule [ ( patternIgnore ( token . «← » ""←"" ) ) ] ` h ) ] "" ] "" ) [ ] ) ] ) )"
-n + 0 = n,"( Tactic . tacticSeq ( Tactic . tacticSeq1Indented [ ( Tactic . simp ""simp"" ( Tactic . optConfig [ ] ) [ ] [ ] [ ] [ ] ) ] ) )"

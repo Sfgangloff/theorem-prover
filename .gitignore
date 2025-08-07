@@ -1,6 +1,0 @@
-/.lake
-/build/
-*.olean
-.lean_cache/
-lake-manifest.json
-goal_output.txt
