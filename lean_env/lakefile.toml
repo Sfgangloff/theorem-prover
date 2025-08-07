@@ -2,6 +2,10 @@ name = "lean_env"
 version = "0.1.0"
 defaultTargets = ["lean_env"]
 
+[[require]]
+name = "mathlib"
+scope = "leanprover-community"
+
 [[lean_lib]]
 name = "LeanEnv"
 
