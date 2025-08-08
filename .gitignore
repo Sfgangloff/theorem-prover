@@ -4,3 +4,5 @@ __pycache__/
 *.lean.old
 *.jsonl
 *.pth/.lake
+openai-api-key.txt
+temp.lean
