@@ -7,7 +7,7 @@ LOG="goal_tactic_log.jsonl"
 > "$LOG"
 
 # Run Lean on all .lean files in your project
-for file in GoalTacticProj/*.lean; do
+for file in lean_env/LeanEnv/instrumented_files/*.lean; do
   echo "Processing $file"
   lake env lean --run "$file"
 done
