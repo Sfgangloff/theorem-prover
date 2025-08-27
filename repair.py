@@ -7,6 +7,8 @@ import torch
 import torch.nn as nn
 from torch.distributions import Categorical
 
+# TODO: Repair a filtered as progressively larger supposed to be valid files (break down into environments). Maybe LLM can generate skeletons this way and then fill them.
+
 # === Environment ===
 
 class LeanRepairEnvChar:
