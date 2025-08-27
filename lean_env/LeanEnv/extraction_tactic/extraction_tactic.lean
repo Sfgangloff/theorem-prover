@@ -1,65 +1,70 @@
--- no module declaration needed in Lean 4
 import Lean
 open Lean Meta Elab Tactic IO
 
--- Pretty-print an expression
+/-- Pretty-print an expression to a string. -/
 def ppExprToString (e : Expr) : MetaM String := do
   let fmt ← PrettyPrinter.ppExpr e
   return fmt.pretty
 
--- Format one hypothesis from the context
-def formatLocalDecl (l : LocalDecl) : MetaM String := do
-  let tyStr ← ppExprToString l.type
-  return s!"{l.userName} : {tyStr}"
+/-- One hypothesis (local declaration) → JSON. -/
+def formatLocalDeclJson (ldecl : LocalDecl) : MetaM Json := do
+  let ty ← ppExprToString ldecl.type
+  return Json.mkObj
+    [ ("name",  Json.str ldecl.userName.toString)
+    , ("type",  Json.str ty)
+    ]
 
--- Extract the context and goal target
-def collectGoalInfo : TacticM String := do
-  let goals ← getGoals
-  match goals with
-  | [] => return "No goals"
-  | g :: _ =>
-    let mvarDecl ← g.getDecl
-    let lctx := mvarDecl.lctx
-    let mut contextStrs := #[]
-    for ldecl in lctx do
-      if ¬ldecl.isImplementationDetail then
-        let s ← formatLocalDecl ldecl
-        contextStrs := contextStrs.push s
-    let targetStr ← ppExprToString mvarDecl.type
-    let header := "Context:\n" ++ String.intercalate "\n" contextStrs.toList
-    let footer := "\n\nGoal:\n" ++ targetStr
-    return header ++ footer
+/-- One goal (by `MVarId`) → JSON with `context` (array) and `target` (string). -/
+def goalToJson (g : MVarId) : MetaM Json := do
+  -- Enter the goal's local context; `withContext` is a method on `MVarId`.
+  g.withContext do
+    let decl ← g.getDecl
+    -- Build JSON array for context
+    let mut ctxArr : Array Json := #[]
+    for ldecl in decl.lctx do
+      if ¬ ldecl.isImplementationDetail then
+        ctxArr := ctxArr.push (← formatLocalDeclJson ldecl)
+    -- Target
+    let tgt ← ppExprToString decl.type
+    return Json.mkObj
+      [ ("target",  Json.str tgt)
+      , ("context", Json.arr ctxArr)
+      ]
 
--- Custom tactic that writes to file
-elab "dumpGoalToFile" : tactic => do
-  let out ← collectGoalInfo
-  let file := "goal_output.txt"
-  IO.FS.writeFile file out
-  logInfo m!"Goal written to {file}"
+/-- Collect *all* current goals as a JSON array. -/
+def collectAllGoalsJson : TacticM Json := do
+  let gs ← getGoals                           -- : List MVarId
+  let arr ← gs.mapM (fun g => liftMetaM (goalToJson g))  -- arr : List Json
+  return Json.arr arr.toArray
 
-/-- Append `data` to a file `path`, creating it if necessary. -/
+/-- Append `data` to file `path` (create if missing). -/
 def appendFile (path : System.FilePath) (data : String) : IO Unit := do
   let h ← IO.FS.Handle.mk path IO.FS.Mode.append
   h.putStr data
   h.flush
 
-/-- Tactic wrapper that logs the goal + tactic to file, then applies the tactic -/
+/--
+`logStep`:
+  * captures **all current goals (before)**,
+  * records the tactic source,
+  * appends one JSON line to `goal_tactic_log.jsonl`,
+  * then executes the tactic.
+-/
 elab "logStep" tac:tacticSeq : tactic => do
-  -- 1. Goal string
-  let goalStr ← collectGoalInfo
+  -- 1) all goals before
+  let goalsJson ← collectAllGoalsJson
 
-  -- 2. Tactic string
+  -- 2) tactic as string
   let tacticStr := toString tac
 
-  -- 3. Format as real JSON
-  let jsonObj : Json := Json.mkObj [
-    ("goal", Json.str goalStr),
-    ("tactic", Json.str tacticStr)
-  ]
-  let log := Json.compress jsonObj ++ "\n"
+  -- 3) assemble a JSON object
+  let jsonObj : Json := Json.mkObj
+    [ ("goals",  goalsJson)
+    , ("tactic", Json.str tacticStr)
+    ]
 
-  -- 4. Write
-  appendFile "goal_tactic_log.jsonl" log
+  -- 4) append as one JSON line
+  appendFile "goal_tactic_log.jsonl" (Json.compress jsonObj ++ "\n")
 
-  -- 5. Apply tactic
+  -- 5) run the tactic
   evalTactic tac
