@@ -1,6 +1,7 @@
 import os
 import re
 from dotenv import load_dotenv
+import subprocess
 
 # --- Heuristics & skip lists -------------------------------------------------
 
@@ -137,6 +138,20 @@ def file_is_incomplete(path: str) -> bool:
         return re.search(r'(^|[^A-Za-z_])((sorryAx)|sorry|admit)($|[^A-Za-z_])', s) is not None
     except OSError:
         return False
+    
+def preflight_compiles(path: str) -> bool:
+    try:
+        # Ask Lean to elaborate and produce/discard an .olean
+        # Use lake’s env so deps are present. -q for quieter output is optional.
+        res = subprocess.run(
+            ["lake", "env", "lean", path, "-o", "/dev/null"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
 
 def instrument_file(input_path, output_path, lean_import_module):
     with open(input_path, "r", encoding="utf-8") as f:
@@ -259,6 +274,10 @@ def instrument_all(folder_in, folder_out, lean_import_module):
                 rel = os.path.relpath(input_path, folder_in)
                 print(f"Skipping (incomplete: contains sorry/admit): {rel}")
                 continue
+
+            # if not preflight_compiles(input_path):
+            #     print(f"Skipping (preflight compile failed): {rel_path}")
+            #     continue
 
             # Ensure output subdir exists
             os.makedirs(os.path.dirname(output_path), exist_ok=True)

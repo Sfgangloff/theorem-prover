@@ -16,15 +16,12 @@ def formatLocalDeclJson (ldecl : LocalDecl) : MetaM Json := do
 
 /-- One goal (by `MVarId`) → JSON with `context` (array) and `target` (string). -/
 def goalToJson (g : MVarId) : MetaM Json := do
-  -- Enter the goal's local context; `withContext` is a method on `MVarId`.
   g.withContext do
     let decl ← g.getDecl
-    -- Build JSON array for context
     let mut ctxArr : Array Json := #[]
     for ldecl in decl.lctx do
       if ¬ ldecl.isImplementationDetail then
         ctxArr := ctxArr.push (← formatLocalDeclJson ldecl)
-    -- Target
     let tgt ← ppExprToString decl.type
     return Json.mkObj
       [ ("target",  Json.str tgt)
@@ -33,8 +30,8 @@ def goalToJson (g : MVarId) : MetaM Json := do
 
 /-- Collect *all* current goals as a JSON array. -/
 def collectAllGoalsJson : TacticM Json := do
-  let gs ← getGoals                           -- : List MVarId
-  let arr ← gs.mapM (fun g => liftMetaM (goalToJson g))  -- arr : List Json
+  let gs ← getGoals
+  let arr ← gs.mapM (fun g => liftMetaM (goalToJson g))
   return Json.arr arr.toArray
 
 /-- Append `data` to file `path` (create if missing). -/
@@ -47,24 +44,29 @@ def appendFile (path : System.FilePath) (data : String) : IO Unit := do
 `logStep`:
   * captures **all current goals (before)**,
   * records the tactic source,
-  * appends one JSON line to `goal_tactic_log.jsonl`,
-  * then executes the tactic.
+  * executes the tactic,
+  * captures **all current goals (after)**,
+  * appends one JSON line to `goal_tactic_log.jsonl`.
 -/
 elab "logStep" tac:tacticSeq : tactic => do
   -- 1) all goals before
-  let goalsJson ← collectAllGoalsJson
+  let goalsBefore ← collectAllGoalsJson
 
   -- 2) tactic as string
   let tacticStr := toString tac
 
-  -- 3) assemble a JSON object
+  -- 3) run the tactic
+  evalTactic tac
+
+  -- 4) all goals after
+  let goalsAfter ← collectAllGoalsJson
+
+  -- 5) assemble a JSON object
   let jsonObj : Json := Json.mkObj
-    [ ("goals",  goalsJson)
-    , ("tactic", Json.str tacticStr)
+    [ ("goals_before", goalsBefore)
+    , ("tactic",       Json.str tacticStr)
+    , ("goals_after",  goalsAfter)
     ]
 
-  -- 4) append as one JSON line
+  -- 6) append as one JSON line
   appendFile "goal_tactic_log.jsonl" (Json.compress jsonObj ++ "\n")
-
-  -- 5) run the tactic
-  evalTactic tac
