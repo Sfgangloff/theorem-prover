@@ -2,7 +2,7 @@
 set -u  # keep -u, but don't use -e so one failure doesn't stop all
 set -o pipefail
 
-LOG="goal_tactic_log.jsonl"
+LOG="data/goal_tactic_log.jsonl"
 
 # Optional: clear if asked
 if [[ "${1-}" == "--clear" ]]; then
