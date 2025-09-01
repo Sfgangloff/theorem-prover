@@ -49,7 +49,7 @@ initialize stepCounters : IO.Ref (Std.HashMap String Nat) ← IO.mkRef {}
 
 /-- Count how many existing log lines already have this `proof_id`. -/
 def nextStepIdxFromLog (proofId : String) : TacticM Nat := do
-  let logPath : System.FilePath := "goal_tactic_log.jsonl"
+  let logPath : System.FilePath := "data/goal_tactic_log.jsonl"
   let fileExists ← logPath.pathExists
   if !fileExists then
     return 0
@@ -128,4 +128,4 @@ elab "logStep" tac:tacticSeq : tactic => do
     , ("versions",     leanVersionJson)
     ]
 
-  let _ ← appendFile "goal_tactic_log.jsonl" (Json.compress jsonObj ++ "\n")
+  let _ ← appendFile "data/goal_tactic_log.jsonl" (Json.compress jsonObj ++ "\n")
