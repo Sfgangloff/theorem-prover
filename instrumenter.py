@@ -1,15 +1,13 @@
+# instrumenter.py
 import os
 import re
-from dotenv import load_dotenv
-from pathlib import Path
-
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-
 import subprocess
+from pathlib import Path
+from dotenv import load_dotenv
 
 # --- Heuristics & skip lists -------------------------------------------------
 
-# Skip entire subtrees if path contains any of these segments
+# Folders to be skipped (files in them do not contain proofs).
 SKIP_DIR_SEGMENTS = {
     os.sep + "Tactic" + os.sep,
     os.sep + "Meta" + os.sep,
@@ -17,39 +15,62 @@ SKIP_DIR_SEGMENTS = {
     os.sep + "Tests" + os.sep,
     os.sep + "_private" + os.sep,
 }
-
-# Lines that indicate this file likely defines/plays with syntax or macros
-# (instrumentation commonly breaks these)
+# Regex expressions detecting modules containing macros/syntax/tactic machinery.
 SUSPECT_FILE_TOKENS = [
     r'^\s*syntax\b', r'^\s*macro_rules\b', r'^\s*macro\b',
     r'^\s*elab\b', r'^\s*declare_syntax_cat\b',
     r'^\s*tactic_extension\b', r'^\s*simproc\b', r'^\s*dsimproc\b',
-    r'\(tactic\|',  # quasiquoters for tactics
+    r'\(tactic\|',
 ]
 
-# Valid tactic starters (keep small & conservative; we can add more later)
+# A reasonably broad set of tactic starters, to answer the question: “does this segment start with a tactic?”
 TACTIC_STARTERS = [
-    # basic
-    r'simp\b', r'simp_all\b', r'simp_rw\b', r'rw\b', r'apply\b', r'exact\b',
-    r'refine\b', r'refine\b', r'intro\b', r'intros\b', r'revert\b',
-    r'cases\b', r'rcases\b', r'constructor\b', r'rfl\b', r'refl\b',
-    r'assumption\b', r'change\b', r'linarith\b', r'nlinarith\b', r'ring\b',
-    r'decide\b', r'aesop\b', r'omega\b', r'norm_num\b', r'zify\b',
     # control / combinators
-    r'first\b', r'try\b', r'all_goals\b', r'any_goals\b', r'repeat\b',
-    # misc often-tactics
-    r'show\b', r'have\b', r'clear\b', r'rename_i\b', r'simp\?',
+    r'first\b', r'try\b', r'all_goals\b', r'any_goals\b', r'repeat\b', r'focus\b',
+    r'fail_if_success\b', r'success_if_fail\b', r'work_on_goal\b',
+
+    # flow
+    r'by_cases\b', r'cases\b', r'rcases\b', r'rintro\b', r'intro\b', r'intros\b',
+    r'revert\b', r'clear\b', r'rename_i\b', r'ext\b',
+    r'by_contra!\b', r'contrapose!\b',
+
+    # apply/exact/refine
+    r'apply\b', r'eapply\b', r'exact\b', r'exacts\b', r'refine\b', r'refine\'\b', r'constructor\b',
+    r'assumption\b',
+
+    # rewriting / simplification / unfolding
+    r'rw\b', r'simp_all\b', r'simp_rw\b', r'simp\?\b', r'simp\b', r'simpa\b',
+    r'dsimp\b', r'unfold\b', r'unfold_rw\b',
+
+    # arithmetic / decision
+    r'linarith\b', r'nlinarith\b', r'ring_nf\b', r'ring\b', r'omega\b', r'decide\b', r'aesop\b',
+    r'norm_num\b', r'zify\b',
+
+    # exact terms / refl
+    r'rfl\b', r'refl\b', r'show\b',
+
+    # declarations inside tactic mode
+    r'have\b', r'obtain\b', r'specialize\b', r'choose\b',
+    # 'let' is only treated as tactic if ':=' is present (handled separately)
+    r'set\b',
+
+    # misc
+    r'change\b', r'generalize\b', r'subst\b', r'replace\b',
 ]
 
-# Things that **cannot** appear at the start of a tactic line inside `by`
-# (if they do, the by-block is suspicious; stop instrumenting that block)
+# Things that cannot start a tactic line
 BAD_TACTIC_PREFIXES = [
     'variable', 'namespace', 'section', 'end', 'theorem', 'lemma', 'def',
     'structure', 'inductive', 'mutual', 'where', 'instance', 'class',
     'macro', 'macro_rules', 'syntax', 'elab', 'tactic_extension',
 ]
 
+# Used to skip instrumenting files that define an entry point, e.g. executable examples or tools
 MAIN_DEF_RE = re.compile(r'^\s*def\s+main\b', re.MULTILINE)
+
+TACTIC_RE = re.compile(r'^(?:' + '|'.join(TACTIC_STARTERS) + r')\b')
+
+# --- Utilities ---------------------------------------------------------------
 
 def strip_comments(src: str) -> str:
     """Remove Lean line (`-- ...`) and block (`/- ... -/`) comments."""
@@ -58,7 +79,6 @@ def strip_comments(src: str) -> str:
     return no_line
 
 def contains_main(path: str) -> bool:
-    """True if file (after stripping comments) defines `def main`."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             src = f.read()
@@ -76,15 +96,13 @@ def file_has_tactic_blocks(path: str) -> bool:
         return False
 
 def path_should_be_skipped(path: str) -> bool:
-    """Skip large/problematic dirs by path heuristics."""
     norm = os.path.normpath(path)
     for seg in SKIP_DIR_SEGMENTS:
-        if seg in (norm + os.sep):  # ensure segment matches a dir boundary
+        if seg in (norm + os.sep):
             return True
     return False
 
 def file_looks_like_macro_or_syntax(path: str) -> bool:
-    """Skip files that likely define macros/syntax/elaborators."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             src = strip_comments(f.read())
@@ -94,16 +112,6 @@ def file_looks_like_macro_or_syntax(path: str) -> bool:
     except OSError:
         pass
     return False
-
-# Build a single big regex for tactic starters: ^\s*(one_of)
-TACTIC_RE = re.compile(r'^\s*(?:' + '|'.join(TACTIC_STARTERS) + r')\b')
-
-def looks_like_tactic_line(s: str) -> bool:
-    """Conservative check: does this line look like a tactic command?"""
-    # Accept `{ ... }` tactic blocks as a single tactic line too
-    if s.startswith('{') or s.startswith('}'):
-        return True
-    return TACTIC_RE.match(s) is not None
 
 def starts_with_bad_prefix(s: str) -> bool:
     st = s.lstrip()
@@ -138,24 +146,143 @@ def file_is_incomplete(path: str) -> bool:
     try:
         with open(path, "r", encoding="utf-8") as f:
             s = f.read()
-        # very lightweight: catch sorry/sorryAx/admit outside identifiers
         return re.search(r'(^|[^A-Za-z_])((sorryAx)|sorry|admit)($|[^A-Za-z_])', s) is not None
     except OSError:
         return False
-    
-def preflight_compiles(path: str) -> bool:
-    try:
-        # Ask Lean to elaborate and produce/discard an .olean
-        # Use lake’s env so deps are present. -q for quieter output is optional.
-        res = subprocess.run(
-            ["lake", "env", "lean", path, "-o", "/dev/null"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        return res.returncode == 0
-    except Exception:
+
+
+# --- Core instrumentation helpers -------------------------------------------
+
+def split_by_semicolons_top_level(s: str):
+    """
+    Split a tactic line by semicolons that are at top level (i.e., not inside (), [], {},
+    and not inside string literals). Returns list of segments (whitespace trimmed on both ends).
+    """
+    segs = []
+    buf = []
+    paren = bracket = brace = 0
+    in_string = False
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if in_string:
+            buf.append(ch)
+            if ch == '"' and (i == 0 or s[i-1] != '\\'):
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            buf.append(ch)
+        elif ch == '(':
+            paren += 1; buf.append(ch)
+        elif ch == ')':
+            paren = max(0, paren-1); buf.append(ch)
+        elif ch == '[':
+            bracket += 1; buf.append(ch)
+        elif ch == ']':
+            bracket = max(0, bracket-1); buf.append(ch)
+        elif ch == '{':
+            brace += 1; buf.append(ch)
+        elif ch == '}':
+            brace = max(0, brace-1); buf.append(ch)
+        elif ch == ';' and paren == 0 and bracket == 0 and brace == 0:
+            segs.append(''.join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    tail = ''.join(buf).strip()
+    if tail:
+        segs.append(tail)
+    return segs
+
+def looks_like_tactic_segment(seg: str) -> bool:
+    """
+    Decide if `seg` looks like a tactic. We accept if:
+    - it matches our tactic starters, OR
+    - it starts with 'let ' AND contains ':=' (tactic-mode let),
+    - '{' or '}' alone (scope braces in tactic mode).
+    """
+    s = seg.lstrip()
+    if not s:
         return False
+    if s[0] in '{}':
+        return True
+    if s.startswith('let ') and ':=' in s:
+        return True
+    return TACTIC_RE.match(s) is not None
+
+def inject_logstep_into_segment(seg: str, already_has=False) -> str:
+    """
+    Prepend 'logStep ' to a segment if appropriate.
+    """
+    if already_has:
+        return seg
+    s = seg.lstrip()
+    leading = seg[:len(seg) - len(s)]
+    if s.startswith("logStep "):
+        return seg
+    if looks_like_tactic_segment(s):
+        return f"{leading}logStep {s}"
+    return seg
+
+def instrument_tactic_line_body(body: str) -> str:
+    """
+    Instrument a single logical tactic line (no leading indentation and without bullet).
+    Split on top-level semicolons and inject 'logStep ' before segments that look like tactics.
+    Preserve non-tactic segments unchanged.
+    Rejoin with ' ; ' to minimize formatting disruption.
+    """
+    segs = split_by_semicolons_top_level(body)
+    out = []
+    for seg in segs:
+        out.append(inject_logstep_into_segment(seg))
+    return " ; ".join(out)
+
+def body_has_instrumentable_segment(body: str) -> bool:
+    """True iff any top-level ;-segment looks like a tactic and isn't already logged."""
+    for seg in split_by_semicolons_top_level(body):
+        s = seg.lstrip()
+        if not s or s.startswith("logStep "):
+            continue
+        if looks_like_tactic_segment(s):
+            return True
+    return False
+
+NBSP = "\u00A0"
+
+def _is_ws(ch: str) -> bool:
+    # Treat Unicode NBSP as whitespace as well.
+    return ch.isspace() or ch == NBSP
+
+def _strip_leading_bullets(body: str) -> tuple[str, str]:
+    """
+    Consume ANY number of leading bullets '·' with any whitespace around them.
+    Returns (prefix, remainder), where `prefix` reproduces the exact whitespace
+    before each bullet and normalizes each consumed bullet to '· ' (bullet+space).
+    The `remainder` is the body after the last consumed bullet (without one
+    extra whitespace char after that bullet, if present).
+    """
+    prefix = ""
+    b = body
+    while True:
+        # keep the exact whitespace before a potential bullet
+        i = 0
+        while i < len(b) and _is_ws(b[i]):
+            i += 1
+        if i >= len(b) or b[i] != "·":
+            # no bullet found; DO NOT consume the whitespace — return original body
+            return prefix, b
+        # accumulate the whitespace and a normalized "· "
+        prefix += b[:i] + "· "
+        # consume that whitespace + the bullet char
+        b = b[i + 1:]
+        # consume ONE following whitespace char after the bullet (space/NBSP/tab/etc.)
+        if b[:1] and _is_ws(b[0]):
+            b = b[1:]
+
+# --- Main per-file instrumenter ---------------------------------------------
 
 def instrument_file(input_path, output_path, lean_import_module):
     with open(input_path, "r", encoding="utf-8") as f:
@@ -166,78 +293,101 @@ def instrument_file(input_path, output_path, lean_import_module):
 
     new_lines = []
     inside_by_block = False
-    indent_level = None
-    block_mode = None  # None | "tactic" | "term"
-    block_suspicious = False
+    base_indent = None
+
+    # Buffers for current `by` block
+    block_raw = []      # original lines (including the line with `:= by`)
+    block_instr = []    # instrumented counterparts
+    block_has_tactic = False
+
+    def flush_block():
+        nonlocal block_raw, block_instr, block_has_tactic
+        if not block_raw:
+            return
+        new_lines.extend(block_instr if block_has_tactic else block_raw)
+        block_raw, block_instr, block_has_tactic = [], [], False
 
     for line in lines:
         stripped = line.strip()
 
-        # Start of a `by` block
+        # Start of a `by` block?
         if (":= by" in stripped) or stripped.endswith(":= by"):
+            # Flush any previous block (shouldn't happen unless malformed)
+            flush_block()
             inside_by_block = True
-            indent_level = None
-            block_mode = None
-            block_suspicious = False
+            base_indent = None
+            block_raw.append(line)
+            block_instr.append(line)  # the `by` line itself is identical
+            continue
+
+        if not inside_by_block:
             new_lines.append(line)
             continue
 
-        if inside_by_block:
-            # Pass through blank lines
-            if stripped == "":
-                new_lines.append(line)
-                continue
+        # Inside a by-block
+        if stripped == "":
+            block_raw.append(line)
+            block_instr.append(line)
+            continue
 
-            current_indent = len(line) - len(line.lstrip(" "))
+        current_indent = len(line) - len(line.lstrip(" "))
+        if base_indent is None:
+            base_indent = current_indent
 
-            # First non-empty line sets indent and block kind
-            if indent_level is None:
-                indent_level = current_indent
-                # Decide block kind from the very first line
-                if starts_with_bad_prefix(stripped):
-                    block_suspicious = True
-                    block_mode = "term"  # treat as non-tactic to be safe
-                else:
-                    # classify by first line only
-                    block_mode = "tactic" if looks_like_tactic_line(stripped) else "term"
+        # Dedent => end of block: flush, then process this line as outside
+        if current_indent < base_indent:
+            inside_by_block = False
+            base_indent = None
+            flush_block()
+            new_lines.append(line)
+            continue
 
-            # Still inside the block?
-            if current_indent >= indent_level:
-                if block_mode != "tactic" or block_suspicious:
-                    # term block or suspicious: never inject
-                    new_lines.append(line)
-                else:
-                    if "logStep" in stripped:
-                        new_lines.append(line)  # already instrumented
-                    else:
-                        if starts_with_bad_prefix(stripped):
-                            # flip to suspicious for the remainder of this block
-                            block_suspicious = True
-                            new_lines.append(line)
-                        elif looks_like_tactic_line(stripped):
-                            log_line = " " * current_indent + "logStep " + line.lstrip(" ")
-                            new_lines.append(log_line)
-                        else:
-                            new_lines.append(line)
-                continue
-            else:
-                # Dedent => block ends
-                inside_by_block = False
-                indent_level = None
-                block_mode = None
-                block_suspicious = False
-                new_lines.append(line)
-                continue
+        # Lines that clearly start a new declaration: keep as-is in both buffers
+        if starts_with_bad_prefix(stripped):
+            block_raw.append(line)
+            block_instr.append(line)
+            continue
 
-        # Outside any `by` block
-        new_lines.append(line)
+        # Prepare to inspect the content:
+        indent_spaces = " " * current_indent
+        rest = line[current_indent:]           # keep punctuation
+        rest_lstrip = rest.lstrip()
+        bullet_prefix_len = len(rest) - len(rest_lstrip)
 
+        # Handle ANY number of leading bullets `·`, allowing arbitrary Unicode whitespace
+        # between indent and bullet, and after each bullet.
+        # Preserve the exact whitespace before each bullet; normalize bullet to "· ".
+        bullet_indent = rest[:bullet_prefix_len]  # whitespace between base indent and first non-ws
+        norm_bullet_prefix, body = _strip_leading_bullets(rest[bullet_prefix_len:])
+        prefix = indent_spaces + bullet_indent + norm_bullet_prefix
+
+        # Decide if this body contains any instrumentable tactic segment
+        if body_has_instrumentable_segment(body):
+            block_has_tactic = True
+
+        # Build instrumented counterpart for this line (non-destructive)
+        instrumented_body = instrument_tactic_line_body(body)
+        inst_line = prefix + instrumented_body
+        if not inst_line.endswith("\n"):
+            inst_line += "\n"
+
+        # Append to buffers
+        block_raw.append(line)
+        block_instr.append(inst_line)
+
+    # End of file: flush any pending block
+    flush_block()
+
+    # Write out
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         f.writelines(new_lines)
 
+
+# --- Folder driver -----------------------------------------------------------
+
 def instrument_all(folder_in, folder_out, lean_import_module):
-    # Clear output folder first (so it mirrors the input)
+    # Clear output folder first
     if os.path.exists(folder_out):
         for root, dirs, files in os.walk(folder_out, topdown=False):
             for fn in files:
@@ -254,43 +404,35 @@ def instrument_all(folder_in, folder_out, lean_import_module):
             rel_path = os.path.relpath(input_path, folder_in)
             output_path = os.path.join(folder_out, rel_path)
 
-            # Skip by directory heuristics
             if path_should_be_skipped(input_path):
                 print(f"Skipping (dir rule): {rel_path}")
                 continue
-
-            # Skip executables
             if contains_main(input_path):
                 print(f"Skipping (has main): {rel_path}")
                 continue
-
-            # Skip macro/syntax-heavy files
             if file_looks_like_macro_or_syntax(input_path):
                 print(f"Skipping (syntax/macro file): {rel_path}")
                 continue
-
-            # Skip files without any tactic blocks
             if not file_has_tactic_blocks(input_path):
                 print(f"Skipping (no tactic blocks): {rel_path}")
                 continue
-
             if file_is_incomplete(input_path):
-                rel = os.path.relpath(input_path, folder_in)
-                print(f"Skipping (incomplete: contains sorry/admit): {rel}")
+                print(f"Skipping (incomplete: contains sorry/admit): {rel_path}")
                 continue
-
             # if not preflight_compiles(input_path):
             #     print(f"Skipping (preflight compile failed): {rel_path}")
             #     continue
 
-            # Ensure output subdir exists
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             print(f"Instrumenting {rel_path}")
             instrument_file(input_path, output_path, lean_import_module)
+
+# --- Entrypoint --------------------------------------------------------------
 
 if __name__ == "__main__":
     load_dotenv(".env")
     RAW_FILES_PATH = os.getenv("RAW_FILES_PATH", "raw_proofs")
     INSTRUMENTED_FILES_PATH = os.getenv("INSTRUMENTED_FILES_PATH", "instrumented_proofs")
     LEAN_LOG_TACTIC_IMPORT = os.getenv("LEAN_LOG_TACTIC_IMPORT", "GoalTacticLogger")
+    print(RAW_FILES_PATH)
     instrument_all(RAW_FILES_PATH, INSTRUMENTED_FILES_PATH, LEAN_LOG_TACTIC_IMPORT)

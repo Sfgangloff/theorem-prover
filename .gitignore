@@ -10,3 +10,4 @@ lean_env/LeanEnv/instrumented_files/
 lean_env/LeanEnv/raw_files/
 lean_env/LeanEnv/invalid_files/
 data/
+runs/
