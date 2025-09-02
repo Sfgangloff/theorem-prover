@@ -1,4 +1,70 @@
-# instrumenter.py
+"""
+instrumenter.py — Lean 4 tactic logger injector
+
+This script rewrites Lean source files to insert `logStep` calls in tactic mode.
+It is intentionally *syntax-light* (regex/heuristics) rather than a full Lean
+parser, but includes enough structure to be robust on Mathlib-style proofs.
+
+High-level behavior
+-------------------
+• Walk an input folder mirroring its structure to an output folder.
+• Skip files and directories likely to contain syntax/macro machinery.
+• Ensure each processed file imports the logger module (e.g., `GoalTacticLogger`).
+• For each `by`-block:
+    - Instrument the **head** of lines ending with `:= by` (e.g. `have … := by`)
+      so that the decision to introduce a sub-proof is itself logged:
+        `have … := by`  →  `logStep have … := by`
+    - Then, inside the `by`-block, prefix `logStep` to each tactic segment
+      (including those chained with `;` and those following bullets `·`).
+• Bullet handling is Unicode-aware: bullets `·` can be nested and may be
+  followed by arbitrary whitespace (including NBSP). Each bullet is normalized
+  upon reconstruction as `"· "` while preserving the user's original indentation.
+• Top-level `;` splitting respects (), [], {} and string literals, so we never
+  split inside tactic arguments or strings.
+
+Why buffer a `by`-block?
+------------------------
+We keep two parallel buffers per block:
+  - `block_raw`   : original lines
+  - `block_instr` : instrumented counterparts
+We also track `block_has_tactic`: True iff any line in the block contains at
+least one instrumentable tactic segment. On flush, we write the instrumented
+version if and only if the block actually had tactics; otherwise we keep it
+verbatim. This avoids invasive edits to purely term-mode `by`-blocks.
+
+What counts as a "tactic segment"?
+----------------------------------
+Within a logical line, we split at top-level semicolons `;` (not inside pairs
+or strings). Each resulting piece is a segment. A segment is recognized as a
+tactic if it:
+  • starts with a known tactic keyword from `TACTIC_STARTERS`, or
+  • is a tactic-mode `let` (starts with `let ` and contains `:=`), or
+  • is a lone `{` / `}` (scope braces in tactic mode).
+Segments already starting with `logStep` are left unchanged (idempotent).
+
+Safety & limitations
+--------------------
+• We conservatively skip files that appear to define syntax/macros/elaborators,
+  and those in certain directories, to avoid corrupting quoted tactic code.
+• Indentation and bullets are handled with Unicode-aware helpers. Dedent ends
+  a `by`-block; blank lines are preserved.
+• This tool does not rewrite branches following `=>` (e.g., `| zero => rfl`);
+  it will still instrument the `rfl` line in the next line if it appears as a
+  separate line, but not the inline RHS unless it matches a leading tactic.
+• If you add/remove entries in `TACTIC_STARTERS`, re-run to rebuild `TACTIC_RE`.
+
+Usage
+-----
+Configure via environment:
+  RAW_FILES_PATH            : input directory
+  INSTRUMENTED_FILES_PATH   : output directory
+  LEAN_LOG_TACTIC_IMPORT    : module name to import for `logStep`
+
+Run as a script: it prints which files are instrumented and writes mirrors
+under `INSTRUMENTED_FILES_PATH`.
+
+"""
+
 import os
 import re
 import subprocess
@@ -32,14 +98,14 @@ TACTIC_STARTERS = [
     # flow
     r'by_cases\b', r'cases\b', r'rcases\b', r'rintro\b', r'intro\b', r'intros\b',
     r'revert\b', r'clear\b', r'rename_i\b', r'ext\b',
-    r'by_contra!\b', r'contrapose!\b',
+    r'by_contra!\b', r'by_contra\b', r'contrapose!\b', r'contrapose\b', r'use\b',r'induction\b',
 
     # apply/exact/refine
     r'apply\b', r'eapply\b', r'exact\b', r'exacts\b', r'refine\b', r'refine\'\b', r'constructor\b',
     r'assumption\b',
 
     # rewriting / simplification / unfolding
-    r'rw\b', r'simp_all\b', r'simp_rw\b', r'simp\?\b', r'simp\b', r'simpa\b',
+    r'rw\b', r'rwa\b', r'simp_all\b', r'simp_rw\b', r'simp\?\b', r'simp\b', r'simpa\b',
     r'dsimp\b', r'unfold\b', r'unfold_rw\b',
 
     # arithmetic / decision
@@ -68,6 +134,7 @@ BAD_TACTIC_PREFIXES = [
 # Used to skip instrumenting files that define an entry point, e.g. executable examples or tools
 MAIN_DEF_RE = re.compile(r'^\s*def\s+main\b', re.MULTILINE)
 
+# Compiled once: checks whether a *segment* begins with any of the starters.
 TACTIC_RE = re.compile(r'^(?:' + '|'.join(TACTIC_STARTERS) + r')\b')
 
 # --- Utilities ---------------------------------------------------------------
@@ -79,6 +146,11 @@ def strip_comments(src: str) -> str:
     return no_line
 
 def contains_main(path: str) -> bool:
+    """
+    True iff the file declares `def main` (after comment stripping).
+    Used to avoid instrumenting runnable entrypoints where logging imports might
+    be undesirable or change runtime dependencies.
+    """
     try:
         with open(path, "r", encoding="utf-8") as f:
             src = f.read()
@@ -96,6 +168,9 @@ def file_has_tactic_blocks(path: str) -> bool:
         return False
 
 def path_should_be_skipped(path: str) -> bool:
+    """
+    True if the normalized path contains any skip-directory segment (Tactic/Meta/Widget/Tests/_private).
+    """
     norm = os.path.normpath(path)
     for seg in SKIP_DIR_SEGMENTS:
         if seg in (norm + os.sep):
@@ -103,6 +178,10 @@ def path_should_be_skipped(path: str) -> bool:
     return False
 
 def file_looks_like_macro_or_syntax(path: str) -> bool:
+    """
+    Heuristic: after stripping comments, does the file contain top-level macro/syntax constructs
+    (e.g., `syntax`, `macro_rules`, `(tactic| …)` quasiquotes, etc.)? If so, we skip the file.
+    """
     try:
         with open(path, "r", encoding="utf-8") as f:
             src = strip_comments(f.read())
@@ -114,6 +193,10 @@ def file_looks_like_macro_or_syntax(path: str) -> bool:
     return False
 
 def starts_with_bad_prefix(s: str) -> bool:
+    """
+    True iff the (left-trimmed) line begins with a declaration/control keyword where instrumentation
+    would be inappropriate (e.g., `theorem`, `namespace`, `macro`, …).
+    """
     st = s.lstrip()
     for p in BAD_TACTIC_PREFIXES:
         if st.startswith(p + ' ') or st == p:
@@ -143,6 +226,10 @@ def ensure_import(lines, import_stmt):
     return new_lines
 
 def file_is_incomplete(path: str) -> bool:
+    """
+    True if the file contains `sorry`, `admit`, or `sorryAx` outside identifiers.
+    We skip such files to avoid logging half-written proofs that may not elaborate.
+    """
     try:
         with open(path, "r", encoding="utf-8") as f:
             s = f.read()
@@ -157,6 +244,9 @@ def split_by_semicolons_top_level(s: str):
     """
     Split a tactic line by semicolons that are at top level (i.e., not inside (), [], {},
     and not inside string literals). Returns list of segments (whitespace trimmed on both ends).
+
+    Rationale: Lean uses `;` to chain tactics on the main goal. We only split at
+    depth zero to avoid breaking tactic arguments and to keep strings intact.
     """
     segs = []
     buf = []
@@ -216,6 +306,9 @@ def looks_like_tactic_segment(seg: str) -> bool:
 def inject_logstep_into_segment(seg: str, already_has=False) -> str:
     """
     Prepend 'logStep ' to a segment if appropriate.
+
+    Idempotent: if `already_has` is True or the segment already starts with
+    'logStep ', the segment is returned unchanged. Leading whitespace is preserved.
     """
     if already_has:
         return seg
@@ -233,6 +326,9 @@ def instrument_tactic_line_body(body: str) -> str:
     Split on top-level semicolons and inject 'logStep ' before segments that look like tactics.
     Preserve non-tactic segments unchanged.
     Rejoin with ' ; ' to minimize formatting disruption.
+
+    Example:
+      'rw [h]; exact foo'  →  'logStep rw [h] ; logStep exact foo'
     """
     segs = split_by_semicolons_top_level(body)
     out = []
@@ -263,6 +359,12 @@ def _strip_leading_bullets(body: str) -> tuple[str, str]:
     before each bullet and normalizes each consumed bullet to '· ' (bullet+space).
     The `remainder` is the body after the last consumed bullet (without one
     extra whitespace char after that bullet, if present).
+
+    This lets lines like:
+        '·     rintro h'   (NBSP after bullet)
+    become:
+        '· logStep rintro h'
+    while preserving indentation and any whitespace before the bullet.
     """
     prefix = ""
     b = body
@@ -285,6 +387,23 @@ def _strip_leading_bullets(body: str) -> tuple[str, str]:
 # --- Main per-file instrumenter ---------------------------------------------
 
 def instrument_file(input_path, output_path, lean_import_module):
+    """
+    Rewrite a single Lean file from `input_path` to `output_path`, inserting `logStep`
+    calls in tactic mode while preserving formatting.
+
+    Steps:
+      1) Ensure `import {lean_import_module}` is present.
+      2) Stream through lines, buffering `by`-blocks:
+         • On encountering a line with `:= by`, instrument the head BEFORE `by`
+           (so `have … := by` is logged), then start buffering the inner block.
+         • While inside the block, compute a Unicode-aware indent baseline and
+           continue until a dedent occurs.
+         • On each line inside, strip any number of bullets `·` (normalizing to
+           `'· '`), split the body at top-level `;`, and prefix `logStep` to
+           tactic-looking segments.
+         • Remember if any line contained a tactic; on dedent, either write the
+           instrumented buffer (if True) or the original (if False).
+    """
     with open(input_path, "r", encoding="utf-8") as f:
         lines = f.readlines()
 
@@ -301,6 +420,10 @@ def instrument_file(input_path, output_path, lean_import_module):
     block_has_tactic = False
 
     def flush_block():
+        """
+        Write the current block to `new_lines`: instrumented if it had any tactic
+        segments, otherwise the raw text. Then reset the block buffers.
+        """
         nonlocal block_raw, block_instr, block_has_tactic
         if not block_raw:
             return
@@ -311,13 +434,45 @@ def instrument_file(input_path, output_path, lean_import_module):
         stripped = line.strip()
 
         # Start of a `by` block?
+        # Start of a `by` block?
         if (":= by" in stripped) or stripped.endswith(":= by"):
-            # Flush any previous block (shouldn't happen unless malformed)
+            # If we were already inside a block, flush it (your current design).
             flush_block()
+
             inside_by_block = True
             base_indent = None
-            block_raw.append(line)
-            block_instr.append(line)  # the `by` line itself is identical
+
+            # --- instrument the head BEFORE ':= by' ---
+            current_indent = len(line) - len(line.lstrip(" "))
+            indent_spaces = " " * current_indent
+            rest = line[current_indent:]                 # keep punctuation/spacing
+            rest_lstrip = rest.lstrip()
+            bullet_prefix_len = len(rest) - len(rest_lstrip)
+            bullet_indent = rest[:bullet_prefix_len]
+
+            # Normalize/collect bullets and get the remainder after bullets
+            norm_bullets, after_bullets = _strip_leading_bullets(rest[bullet_prefix_len:])
+
+            # Split once at the first ':= by'
+            head, sep, tail = after_bullets.partition(":= by")
+            # Instrument the head like a normal tactic body
+            inst_head = instrument_tactic_line_body(head)
+
+            # Build raw vs instrumented versions of this line
+            raw_line = line
+            inst_line = indent_spaces + bullet_indent + norm_bullets + inst_head + sep + tail
+            if not inst_line.endswith("\n"):
+                inst_line += "\n"
+
+            # Update block buffers
+            block_raw.append(raw_line)
+            block_instr.append(inst_line)
+
+            # If the head contains a tactic (e.g., 'have', 'refine', 'show', 'set', 'choose', …),
+            # flip the block flag so we emit the instrumented block on flush.
+            if body_has_instrumentable_segment(head):
+                block_has_tactic = True
+
             continue
 
         if not inside_by_block:
@@ -387,6 +542,14 @@ def instrument_file(input_path, output_path, lean_import_module):
 # --- Folder driver -----------------------------------------------------------
 
 def instrument_all(folder_in, folder_out, lean_import_module):
+    """
+    Mirror `folder_in` into `folder_out`, instrumenting each Lean file that:
+      • is not in a skipped directory,
+      • does not define `def main`,
+      • does not look like a syntax/macro module,
+      • contains at least one `:= by`,
+      • does not contain `sorry`/`admit`.
+    """
     # Clear output folder first
     if os.path.exists(folder_out):
         for root, dirs, files in os.walk(folder_out, topdown=False):
@@ -434,5 +597,5 @@ if __name__ == "__main__":
     RAW_FILES_PATH = os.getenv("RAW_FILES_PATH", "raw_proofs")
     INSTRUMENTED_FILES_PATH = os.getenv("INSTRUMENTED_FILES_PATH", "instrumented_proofs")
     LEAN_LOG_TACTIC_IMPORT = os.getenv("LEAN_LOG_TACTIC_IMPORT", "GoalTacticLogger")
-    print(RAW_FILES_PATH)
     instrument_all(RAW_FILES_PATH, INSTRUMENTED_FILES_PATH, LEAN_LOG_TACTIC_IMPORT)
+

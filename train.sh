@@ -1,0 +1,1 @@
+python3 rl_bandit.py --mode train --infile data/canonicalized_pairs.jsonl --epochs 3 --verbose
