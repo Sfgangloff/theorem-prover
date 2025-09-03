@@ -1,150 +1,73 @@
 # RL Theorem Prover Pipeline
 
-This project builds a reinforcement learning (RL) pipeline around Lean4 theorem proving.  
-We log tactics, extract training data, and prepare it for models.
+This project builds a pipeline for proving theorems written in Lean and using RL (reinforcement learning), 
+which is constituted of the following elements: 
 
----
+1. **Instrumentation.** We extract proof steps data from mathlib using an ad-hoc tactic which we write 
+in every mathlib file before running them. In particular, the tactic records every tactic chosen 
+and the context (hypotheses and goals).
+2. **Data recording.** We then run every file in mathlib in order to run the written tactics and 
+record data.
+3. **Data preparation.** We then transform these data to prepare them for learning.
+4. **Training.** We then train some RL model in order to predict the next tactic from the context.
+5. **Proving.** The prover then uses Lean to write the proof and collect the context after each tactic it chooses, and choose the next one.
+
+# Structure of the project
+
+The Lean part of the project is contained in the `lean_env` folder. 
+
+# Running it 
 
 ## 1. Instrumentation
 
-We define a custom Lean tactic `logStep` that records:
-- goals before tactic
-- the tactic itself
-- goals after or error
-- metadata (proof id, step index, timing, Lean version, etc.)
-
-Logs are stored in `goal_tactic_log.jsonl`.
-
----
-
-## 2. Dump All
-
-We run all instrumented Lean files:
+First, run the instrumenter using the following command: 
 
 ```bash
-bash dump_all.sh
+python instrumenter.py
 ```
 
-This appends all tactic logs to `goal_tactic_log.jsonl`.
+This inserts the tactic `logStep` defined in the file `lean_env/LeanEnv/ExtractionTactic.Lean` at the beginning of every line of a tactic block in every .lean file in the mathlib library (contained in the `extern` folder).
+The modified files are all written in `lean_env/instrumented_files`.
 
----
+## 2. Data recording
 
-## 3. ETL: Episodes & Transitions
-
-Convert the raw JSONL log into episodes and transitions:
+In order to record the data, run the following command: 
 
 ```bash
-python3 scripts/make_episodes.py \
-  --in $LOG_FILE \
-  --episodes episodes.json \
-  --transitions transitions.jsonl
+bash lean_env/dump_all.sh
 ```
 
-- **episodes.json** groups steps by proof_id.  
-- **transitions.jsonl** flattens into transitions with (obs, action, next_obs).
+You can find the proof steps data in `lean_env/data/goal_tactic_log.jsonl`, and logs for instances of executing 
+the `logStep` tactic which went wrong in `lean_env/data/goal_tactic_log.jsonl.bad`.
 
----
+## 3. Data preparation
 
-## 4. Observation Pairs
-
-We build simplified `(input, action_raw)` pairs for training.
+Then run the following in order to prepare the data for training: 
 
 ```bash
-python3 scripts/make_obs_pairs.py \
-  --infile transitions.jsonl \
-  --outfile obs_pairs.jsonl
+bash rewrites.sh
 ```
 
-Output format:
+## 4. Training 
 
-```json
-{
-  "input": "GOAL: univ.WellFoundedOn r ↔ WellFounded r\nCONTEXT:\n  α : Type u_2\n  r : α → α → Prop",
-  "proof_id": "LeanEnv/.../WellFoundedSet.lean::Set.wellFoundedOn_univ::L92",
-  "meta": { "decl": "Set.wellFoundedOn_univ", "status": "ok", "step_idx": 0 },
-  "action_raw": "(Tactic.simp ...)"
-}
-```
-
----
-
-## 5. Canonicalization of Tactics
-
-The raw `action_raw` strings are verbose Lean ASTs.  
-We canonicalize them into compact Lean tactic strings.
-
-**Command:**
+In order to train the model, use the following: 
 
 ```bash
-python3 scripts/canonicalize_tactics.py \
-  --infile obs_pairs.jsonl \
-  --outfile canonicalized_pairs.jsonl
+bash train.sh
 ```
 
-**Output Format:**
+## 5. Proving
 
-Each line is a JSON object with the same input, but `action_raw` replaced by a canonicalized `action`:
-
-```json
-{
-  "input": "GOAL: univ.WellFoundedOn r ↔ WellFounded r\nCONTEXT:\n  α : Type u_2\n  r : α → α → Prop",
-  "action": "simp [wellFoundedOn_iff]",
-  "proof_id": "LeanEnv/.../WellFoundedSet.lean::Set.wellFoundedOn_univ::L92",
-  "meta": { "decl": "Set.wellFoundedOn_univ", "status": "ok", "step_idx": 0 }
-}
-```
-
----
-
-## 6. Sanity Checks
-
-Run quick checks on the data:
-
-- Ensure number of input lines equals number of output lines.
-- Sample random entries and confirm:
-  - `input` always contains both **GOAL** and **CONTEXT**.
-  - `action` is non-empty after canonicalization.
-  - Proof_ids group into consistent episodes.
-
----
-
-## RL Bandit Baseline
-
-We train a simple **policy network** (bag-of-words → linear classifier) to predict tactics from goals.  
-
-### Training
+You can find an example of theorem with incomplete proof in `lean_env/LeanEnv/Example.lean`. When running 
 
 ```bash
-python3 rl_bandit.py --mode train   --infile lean_env/canonicalized_pairs.jsonl   --outdir runs/rl_bandit
+bash prove.sh
 ```
 
-- Input = goal + context tokens.  
-- Output = tactic (from canonicalized set).  
-- Reward = `1` only when a step is terminal (`done == True` and `status == "ok"`).  
-- Loss = cross-entropy weighted by reward (bandit-style).  
-- Checkpoints saved under `runs/rl_bandit/policy.pt`.
+the prover will create a file `Example.proof.lean` in the same folder and progressively write proof steps. 
+These steps are recorded in `lean_env/data` in some `auto-*.jsonl` file, where `*` corresponds to the run id.
 
-### Prediction
+# Explanations
 
-```bash
-python3 rl_bandit.py --mode predict   --outdir runs/rl_bandit   --text "GOAL: s.WellFoundedOn r ..."
-```
+We describe these steps in more detail below.
 
-or batch over a file:
-
-```bash
-python3 rl_bandit.py --mode predict   --infile lean_env/canonicalized_pairs.jsonl   --outdir runs/rl_bandit
-```
-
----
-
-## Next Steps
-
-- TODO: test the RL + elaborate strategy. Reward proportionally to the decrease in goal "logical complexity", + additional reward inversely proportional to time (favour short proofs) + eq negative rewards.
-- TODO: database of goal + context that can be used to recognize known knowledge.
-- USE the world model to predict few steps and calculate reward on these steps. Train the policy using these rewards.
-
-- Evaluate accuracy vs reward-weighted CE on held-out data.
-- Add curriculum (longer proofs / harder goals later).
-- Extend policy beyond bag-of-words (RNN / Transformer encoders).
-- Later: integrate a **world model** to predict next goals, enabling lookahead RL.
