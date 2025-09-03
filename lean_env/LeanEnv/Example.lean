@@ -1,6 +1,4 @@
--- file: examples/IdApply.lean
-import Lean
-open Lean Meta Elab Tactic
+open Classical
 
-theorem id_apply (α : Type) (x : α) : id x = x := by
+theorem ex_and_comm (p q : Prop) : p ∧ q ↔ q ∧ p := by
   -- @TACTICS@

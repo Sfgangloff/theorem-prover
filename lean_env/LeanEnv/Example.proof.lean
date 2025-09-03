@@ -1,8 +1,16 @@
-import LeanEnv.ExtractionTactic
--- file: examples/IdApply.lean
-import Lean
-open Lean Meta Elab Tactic
+open Classical
 
-theorem id_apply (α : Type) (x : α) : id x = x := by
-    logStepAuto simp
-
+theorem ex_and_comm (p q : Prop) : p ∧ q ↔ q ∧ p := by
+  constructor
+  intro h
+  constructor
+  rcases h with ⟨hp, hq⟩
+  exact hq
+  rcases h with ⟨hp, hq⟩
+  exact hp
+  intro h
+  constructor
+  rcases h with ⟨hp, hq⟩
+  exact hq
+  rcases h with ⟨hp, hq⟩
+  exact hp
