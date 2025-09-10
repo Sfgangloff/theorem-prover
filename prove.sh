@@ -9,7 +9,7 @@ python3 two_stages_auto_prove.py \
   --out           lean_env/LeanEnv/Example.proof.lean \
   --build         "lake env lean LeanEnv/Example.proof.lean" \
   --project_root  lean_env \
-  --decl          ex_and_comm \
+  --decl          cast_add_rw \
   --topk_templates 5 \
   --topk_lemmas    10 \
   --max_steps      50 \

@@ -22,8 +22,8 @@ def have(cmd: str) -> bool:
 @pytest.mark.skipif(not TEMPLATE_CKPT.exists(), reason="set TEMPLATE_CKPT to trained template checkpoint")
 def test_two_stage_simple_proof(tmp_path):
     # Arrange: write a fresh mini template in LeanEnv/
-    tpl = LEANSRC_DIR / "ExampleTest.lean"
-    out = LEANSRC_DIR / "ExampleTest.proof.lean"
+    tpl = LEANSRC_DIR / "tests" / "TestAndCommute.lean"
+    out = LEANSRC_DIR / "tests" / "TestAndCommute.proof.lean"
     tpl.write_text(
         (
             "open Classical\n"

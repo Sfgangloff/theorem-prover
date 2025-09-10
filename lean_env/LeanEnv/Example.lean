@@ -1,4 +1,6 @@
-open Classical
+import Mathlib
 
-theorem ex_and_comm (p q : Prop) : p ∧ q ↔ q ∧ p := by
+variable {R : Type*} [Semiring R]
+
+theorem cast_add_rw (n m : ℕ) : ((n + m : ℕ) : R) = (n : R) + (m : R) := by
   -- @TACTICS@

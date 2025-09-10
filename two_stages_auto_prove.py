@@ -180,7 +180,6 @@ class LemmaPolicy:
         """
         def to_local2global(obj) -> Dict[int,int]:
             if isinstance(obj, dict):
-                # keys may be str/int; values may be str/int
                 return {int(k): int(v) for k, v in obj.items()}
             elif isinstance(obj, list):
                 return {i: int(v) for i, v in enumerate(obj)}
@@ -198,7 +197,6 @@ class LemmaPolicy:
                 if not m and i < len(dims):
                     m = {j: j for j in range(dims[i])}
                 out.append(m)
-            # pad to match dims length
             while len(out) < len(dims):
                 out.append({j: j for j in range(dims[len(out)])})
             return out
@@ -212,7 +210,6 @@ class LemmaPolicy:
                 out.append(m)
             return out
 
-        # fallback
         return [{i: i for i in range(d)} for d in dims]
 
     @classmethod
@@ -258,7 +255,6 @@ class LemmaPolicy:
         is_multi = any(k.startswith(("lemma_heads.", "heads.")) for k in keys)
 
         if is_multi:
-            # derive dims from weights if possible
             dims = cls._infer_multi_dims_from_state(state)
             if not dims:
                 dims_raw = ckpt.get("lemma_dims")
@@ -278,7 +274,6 @@ class LemmaPolicy:
             # head maps: prefer forward maps; if only reverse present, invert
             raw_maps = ckpt.get("lemma_id_maps")
             if raw_maps is None and "lemma_id_rev_maps" in ckpt:
-                # invert rev maps (global->local)
                 rev = ckpt["lemma_id_rev_maps"]
                 if isinstance(rev, list):
                     raw_maps = []
@@ -315,14 +310,17 @@ class LemmaPolicy:
             model = EmbBagClassifier(len(vocab), d_model, num_classes)
             _load_state_dict_compat(model, state, map_to="lemmas-single")
             head_maps = [{i: i for i in range(num_classes)}]
-            # force template2id to one head
             template2id = {k: 0 for k in template2id.keys()}
 
         model.eval()
         return cls(model, vocab, template2id, head_maps, lemma_id2name, d_model)
 
     def topk(self, text: str, template: str, k: int) -> List[Tuple[str,float]]:
-        """Return lemma *names* (not ids) with probabilities for given template."""
+        """
+        Return lemma *names* (not ids) with probabilities for given template.
+        Unknown lemma IDs (not found in id->name mapping) are SKIPPED
+        to avoid emitting placeholders like 'lemma_2089'.
+        """
         ids = [self.vocab.get(t, 0) for t in text.replace("\n"," ").split()]
         tokens = torch.tensor(ids if ids else [0], dtype=torch.long)
         offsets = torch.tensor([0], dtype=torch.long)
@@ -339,16 +337,51 @@ class LemmaPolicy:
             probs = torch.softmax(logits, dim=-1).squeeze(0)
             top = torch.topk(probs, k=min(k, probs.numel()))
             local2global = self.head_class_to_lemma_id[head_idx] if head_idx < len(self.head_class_to_lemma_id) else {}
-            lemmas = []
+            lemmas: List[Tuple[str,float]] = []
+            seen: set[str] = set()
             for cls_id, p in zip(top.indices.tolist(), top.values.tolist()):
                 lemma_id = local2global.get(int(cls_id), int(cls_id))
-                name = self.lemma_id2name.get(lemma_id, f"lemma_{lemma_id}")
-                lemmas.append((name, float(p)))
+                name = self.lemma_id2name.get(lemma_id)
+                if not name:
+                    continue  # skip unknown → prevents 'lemma_1234'
+                if name not in seen:
+                    lemmas.append((name, float(p)))
+                    seen.add(name)
             return lemmas
 
 # ------------------------------
 # Build / JSONL helpers
 # ------------------------------
+
+def load_lemma_index_json(path: Optional[str | Path]):
+    """
+    Returns (id2name, name2id) dicts or ({}, {}) if path is None/missing.
+    Supports files produced by your index builder:
+      {
+        "name2id": {"Nat.cast_add": 247, ...},
+        "id2name": {"247": "Nat.cast_add", ...}
+      }
+    """
+    if not path:
+        return {}, {}
+    p = Path(path)
+    if not p.exists():
+        return {}, {}
+    with p.open("r", encoding="utf-8") as f:
+        idx = json.load(f)
+    if "id2name" in idx and "name2id" in idx:
+        id2name = {int(k): v for k, v in idx["id2name"].items()}
+        name2id = {k: int(v) for k, v in idx["name2id"].items()}
+        return id2name, name2id
+    if "name2id" in idx:
+        name2id = {k: int(v) for k, v in idx["name2id"].items()}
+        id2name = {v: k for k, v in name2id.items()}
+        return id2name, name2id
+    if "id2name" in idx:
+        id2name = {int(k): v for k, v in idx["id2name"].items()}
+        name2id = {v: k for k, v in id2name.items()}
+        return id2name, name2id
+    return {}, {}
 
 def run_build(cmd_base: str, run_id: str, run_log: Path, cwd: Path) -> Tuple[int, str, str]:
     full_cmd = f'RUN_ID_OVERRIDE="{run_id}" RUN_JSON_PATH="{run_log}" RUN_SOURCE="auto-prove" {cmd_base}'
@@ -458,6 +491,9 @@ def top_has_and(goal: str) -> bool:
 
 def heuristic_candidates(goal: str, ctx: List[Tuple[str,str]]) -> List[str]:
     add: List[str] = []
+    # NEW: if equality and not a negation, try rfl as a cheap finisher
+    if (" = " in goal) and ("≠" not in goal):
+        add.append("rfl")
     if top_has_iff(goal) or top_has_and(goal):
         add.append("constructor")
     if "→" in goal or " -> " in goal:
@@ -501,7 +537,6 @@ def order_candidates(goal: str,
     De-duplicate while preserving order.
     """
     seen, out = set(), []
-    # if goal has an arrow, a bare 'exact' is almost never right
     forbid_exact = ("→" in goal) or (" -> " in goal)
     for a in heuristic_list + policy_templates:
         if a == "exact" and forbid_exact:
@@ -512,7 +547,6 @@ def order_candidates(goal: str,
 
 def needs_lemmas(template: str) -> bool:
     t = template.strip().lower()
-    # exact/apply/rw/simp all need a payload; we’ll skip if none predicted
     return t in {"exact", "apply", "rw", "simp", "simp_all"}
 
 def build_tactic(template: str, lemmas: List[str]) -> Optional[str]:
@@ -532,10 +566,9 @@ def build_tactic(template: str, lemmas: List[str]) -> Optional[str]:
         return f"rw [{payload}]" if payload else None
 
     if low == "exact":
-        # only okay if we actually have a lemma name to supply
         return f"exact {lemmas[0]}" if lemmas else None
 
-    # templates that don’t require lemmas:
+    # templates that don’t require lemmas (constructor/intro/rcases/rfl/etc.)
     return t
 
 # ------------------------------
@@ -609,7 +642,6 @@ def greedy_prove(tmpl_policy: TemplatePolicy,
                 if lemma_policy is not None:
                     lemmas = [name for name,_ in lemma_policy.topk("GOAL: " + prev_goal, tpl, topk_lemmas)]
                     tactic = build_tactic(tpl, lemmas)
-                # If we still have no payload, skip (prevents bare 'exact' etc.)
                 if tactic is None:
                     if verbose:
                         print(f"  - SKIP '{tpl}' (no lemma payload available)")
